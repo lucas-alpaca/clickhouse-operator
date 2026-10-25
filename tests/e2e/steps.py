@@ -97,21 +97,36 @@ def _dump_failed_test_namespace(test, ns, shell):
                 ns=ns, ok_to_fail=True, timeout=15, shell=shell,
             )
             print(f"Published raft_configuration:\n{published or '(unavailable)'}")
-            for pod in sorted(kubectl.get_chk_pod_names(chk, ns=ns, shell=shell))[:2]:
+            # Inspect the failing joiner too: during 1->3 scaling replica 0-2
+            # can CrashLoopBackOff while 0-0 and 0-1 remain healthy.
+            for pod in sorted(kubectl.get_chk_pod_names(chk, ns=ns, shell=shell))[:5]:
                 print(f"\n# {pod}: live /keeper/config")
-                live = kubectl.launch(
-                    f"exec {pod} -c clickhouse-keeper -- "
-                    'clickhouse-keeper-client --history-file=/dev/null '
-                    '-h 127.0.0.1 -p 2181 -q "get \'/keeper/config\'"',
-                    ns=ns, ok_to_fail=True, timeout=15, shell=shell,
-                )
-                print(live or "(unavailable)")
-                print(f"# {pod}: Keeper log (last {_dump_log_lines} lines)")
-                logs = kubectl.launch(
-                    f"logs {pod} -c clickhouse-keeper --tail={_dump_log_lines}",
-                    ns=ns, ok_to_fail=True, timeout=15, shell=shell,
-                )
-                print(logs or "(unavailable)")
+                try:
+                    live = kubectl.launch(
+                        f"exec {pod} -c clickhouse-keeper -- "
+                        'clickhouse-keeper-client --history-file=/dev/null '
+                        '-h 127.0.0.1 -p 2181 -q "get \'/keeper/config\'"',
+                        ns=ns, ok_to_fail=True, timeout=15, shell=shell,
+                    )
+                    print(live or "(unavailable)")
+                except Exception as exc:
+                    print(f"live Keeper membership unavailable for {pod}: {exc}")
+
+                # The previous container's log usually contains the fatal
+                # startup message lost when Kubernetes restarts the joiner.
+                for label, option, tail in (
+                    ("current", "", _dump_log_lines),
+                    ("previous", "--previous", 80),
+                ):
+                    print(f"# {pod}: Keeper {label} log (last {tail} lines)")
+                    try:
+                        logs = kubectl.launch(
+                            f"logs {pod} -c clickhouse-keeper {option} --tail={tail}",
+                            ns=ns, ok_to_fail=True, timeout=15, shell=shell,
+                        )
+                        print(logs or "(unavailable)")
+                    except Exception as exc:
+                        print(f"Keeper {label} log unavailable for {pod}: {exc}")
     except Exception as exc:
         print(f"failed to fetch Keeper Raft diagnostics: {exc}")
 
